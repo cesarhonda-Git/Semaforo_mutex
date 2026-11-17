@@ -13,7 +13,6 @@ static const struct device *port_a = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 #define PIN_LED_VERDEP    4   // PTD4 (Pino D2 Arduino) - Verde Pedestre
 #define PIN_LED_VERMELHOP 12  // PTA12 (Pino D3 Arduino) - Vermelho Pedestre
 
-/* Prioridade 5 (menor que o main=0): garante que main configure os pinos antes */
 #define PRIO_THREAD_NOTURNO_PEDESTRE 5
 #define PRIO_THREAD_NOTURNO_VEICULO  5
 
