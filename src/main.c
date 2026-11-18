@@ -3,16 +3,25 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
 
+#define MODO_NORMAL  0
+#define MODO_NOTURNO 1
+#define MODO_BOTAO   2
+
+/* Escolha o modo aqui: MODO_NORMAL, MODO_NOTURNO ou MODO_BOTAO */
+#define MODO_ATUAL MODO_BOTAO
+
+// Descomente caso não esteja definindo via platformio.ini (-DPLACA1 / -DPLACA2)
+// #define PLACA1
+// #define PLACA2
+
+#if !defined(PLACA1) && !defined(PLACA2)
+#error "Defina PLACA1 ou PLACA2 antes de compilar!"
+#endif
+
+// --- LEDs internos via DeviceTree ---
 #define LEDR_NODE DT_ALIAS(led2)
 #define LEDG_NODE DT_ALIAS(led0)
 #define LEDB_NODE DT_ALIAS(led1)
-
-static const struct device *port_d = DEVICE_DT_GET(DT_NODELABEL(gpiod));
-static const struct device *port_a = DEVICE_DT_GET(DT_NODELABEL(gpioa));
-
-#define PIN_LED_VERDEP    4   // PTD4  - Verde Pedestre
-#define PIN_LED_VERMELHOP 12  // PTA12 - Vermelho Pedestre
-#define PIN_BOTAO         13  // PTA13 - Botão de Pedestre (ligado ao GND)
 
 #if DT_NODE_HAS_STATUS(LEDR_NODE, okay) && \
     DT_NODE_HAS_STATUS(LEDG_NODE, okay) && \
@@ -26,6 +35,20 @@ static const struct gpio_dt_spec ledb = GPIO_DT_SPEC_GET(LEDB_NODE, gpios);
 #error "LEDs não encontrados"
 #endif
 
+// --- Portas GPIO ---
+static const struct device *port_d = DEVICE_DT_GET(DT_NODELABEL(gpiod));
+static const struct device *port_a = DEVICE_DT_GET(DT_NODELABEL(gpioa));
+
+// --- Pinos Externos e Botão ---
+#define PIN_LED_VERDEP    4   // PTD4  (J1-6) - Verde Pedestre
+#define PIN_LED_VERMELHOP 12  // PTA12 (J1-8) - Vermelho Pedestre
+#define PIN_BOTAO         13  // PTA13 (J2-2) - Botão de Pedestre (ligado ao GND)
+
+// --- Pinos de Sincronização entre Placas (Porta A) ---
+#define PIN_SYNC_OUT 17  // PTA17 (J2-11, fileira interna) - Saída
+#define PIN_SYNC_IN  16  // PTA16 (J2-9,  fileira interna) - Entrada
+
+// --- Prioridades e Tempos ---
 #define PRIO_THREAD_VERDE_CARRO       7
 #define PRIO_THREAD_AMARELO_CARRO     7
 #define PRIO_THREAD_VERMELHO_CARRO    7
@@ -45,18 +68,16 @@ static const struct gpio_dt_spec ledb = GPIO_DT_SPEC_GET(LEDB_NODE, gpios);
 K_MUTEX_DEFINE(mutex_carro);
 K_MUTEX_DEFINE(mutex_pedestre);
 
-#define MODO_NORMAL  0
-#define MODO_NOTURNO 1
-#define MODO_BOTAO   2
-
-#define MODO_ATUAL MODO_BOTAO
-
-volatile int vez = 0;    // 0 -> verde, 1 -> amarelo, 2 -> vermelho
-volatile int vezped = 1; // 0 -> verde, 1 -> vermelho
+// --- Estado Inicial Oposto para Evitar Colisão entre as Vias ---
+#if defined(PLACA1)
+volatile int vez = 0;    // 0 -> verde | 1 -> amarelo | 2 -> vermelho
+volatile int vezped = 1; // 0 -> verde | 1 -> vermelho
+#elif defined(PLACA2)
+volatile int vez = 2;    // começa no vermelho
+volatile int vezped = 0; // começa no verde
+#endif
 
 volatile bool acao_botao_rodando = false;
-volatile bool ciclo_interrompido_carro = false;
-volatile bool ciclo_interrompido_ped = false;
 
 static void set_rgb_veiculo(int r, int g, int b)
 {
@@ -71,11 +92,27 @@ static void set_rg_pedestre(int r, int g)
     gpio_pin_set(port_d, PIN_LED_VERDEP, g);
 }
 
+/* Espera fracionada: permite interromper imediatamente quando o botão é apertado */
+static bool esperar_ou_interromper(int total_ms)
+{
+    int decorrido = 0;
+    while (decorrido < total_ms) {
+        if (acao_botao_rodando) {
+            return true;
+        }
+        k_msleep(20);
+        decorrido += 20;
+    }
+    return acao_botao_rodando;
+}
+
+/* ================= THREADS DOS SEMÁFOROS ================= */
+
 void thread_VERDE_CARRO(void *p1, void *p2, void *p3)
 {
     while (1) {
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        if (vez != 0) {
+        if (vez != 0 || acao_botao_rodando) {
             k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
@@ -83,17 +120,15 @@ void thread_VERDE_CARRO(void *p1, void *p2, void *p3)
         set_rgb_veiculo(0, 1, 0); // Liga LED VERDE
         k_mutex_unlock(&mutex_carro);
 
-        k_msleep(TEMPO_VERDE_CARRO_MS);
+        if (esperar_ou_interromper(TEMPO_VERDE_CARRO_MS)) {
+            continue; // Volta ao topo limpo se o botão interrompeu
+        }
 
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        /* Se foi interrompida pelo botão durante o sleep, descarta o resto e reinicia */
-        if (ciclo_interrompido_carro) {
-            ciclo_interrompido_carro = false;
-            k_mutex_unlock(&mutex_carro);
-            continue;
+        if (!acao_botao_rodando) {
+            set_rgb_veiculo(0, 0, 0);
+            vez = 1;
         }
-        set_rgb_veiculo(0, 0, 0);
-        vez = 1;
         k_mutex_unlock(&mutex_carro);
     }
 }
@@ -111,10 +146,9 @@ void thread_AMARELO_CARRO(void *p1, void *p2, void *p3)
         set_rgb_veiculo(0, 0, 0);
         k_mutex_unlock(&mutex_carro);
         k_msleep(1000);
-        /* NÃO coloque '}' aqui antes do #else */
 #else
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        if (vez != 1) {
+        if (vez != 1 || acao_botao_rodando) {
             k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
@@ -122,21 +156,25 @@ void thread_AMARELO_CARRO(void *p1, void *p2, void *p3)
         set_rgb_veiculo(1, 1, 0); // Liga LED AMARELO
         k_mutex_unlock(&mutex_carro);
 
-        k_msleep(TEMPO_AMARELO_CARRO_MS);
+        if (esperar_ou_interromper(TEMPO_AMARELO_CARRO_MS)) {
+            continue;
+        }
 
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        set_rgb_veiculo(0, 0, 0);
-        vez = 2;
+        if (!acao_botao_rodando) {
+            set_rgb_veiculo(0, 0, 0);
+            vez = 2;
+        }
         k_mutex_unlock(&mutex_carro);
 #endif
-    } 
+    }
 }
 
 void thread_VERMELHO_CARRO(void *p1, void *p2, void *p3)
 {
     while (1) {
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        if (vez != 2) {
+        if (vez != 2 || acao_botao_rodando) {
             k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
@@ -144,11 +182,15 @@ void thread_VERMELHO_CARRO(void *p1, void *p2, void *p3)
         set_rgb_veiculo(1, 0, 0); // Liga LED VERMELHO
         k_mutex_unlock(&mutex_carro);
 
-        k_msleep(TEMPO_VERMELHO_CARRO_MS);
+        if (esperar_ou_interromper(TEMPO_VERMELHO_CARRO_MS)) {
+            continue;
+        }
 
         k_mutex_lock(&mutex_carro, K_FOREVER);
-        set_rgb_veiculo(0, 0, 0);
-        vez = 0;
+        if (!acao_botao_rodando) {
+            set_rgb_veiculo(0, 0, 0);
+            vez = 0;
+        }
         k_mutex_unlock(&mutex_carro);
     }
 }
@@ -157,7 +199,7 @@ void thread_VERDE_PEDESTRE(void *p1, void *p2, void *p3)
 {
     while (1) {
         k_mutex_lock(&mutex_pedestre, K_FOREVER);
-        if (vezped != 0) {
+        if (vezped != 0 || acao_botao_rodando) {
             k_mutex_unlock(&mutex_pedestre);
             k_msleep(10);
             continue;
@@ -165,11 +207,15 @@ void thread_VERDE_PEDESTRE(void *p1, void *p2, void *p3)
         set_rg_pedestre(0, 1); // Liga LED VERDE pedestre
         k_mutex_unlock(&mutex_pedestre);
 
-        k_msleep(TEMPO_VERDE_PEDESTRE_MS);
+        if (esperar_ou_interromper(TEMPO_VERDE_PEDESTRE_MS)) {
+            continue;
+        }
 
         k_mutex_lock(&mutex_pedestre, K_FOREVER);
-        set_rg_pedestre(0, 0);
-        vezped = 1;
+        if (!acao_botao_rodando) {
+            set_rg_pedestre(0, 0);
+            vezped = 1;
+        }
         k_mutex_unlock(&mutex_pedestre);
     }
 }
@@ -178,7 +224,7 @@ void thread_VERMELHO_PEDESTRE(void *p1, void *p2, void *p3)
 {
     while (1) {
         k_mutex_lock(&mutex_pedestre, K_FOREVER);
-        if (vezped != 1) {
+        if (vezped != 1 || acao_botao_rodando) {
             k_mutex_unlock(&mutex_pedestre);
             k_msleep(10);
             continue;
@@ -186,17 +232,15 @@ void thread_VERMELHO_PEDESTRE(void *p1, void *p2, void *p3)
         set_rg_pedestre(1, 0); // Liga LED VERMELHO pedestre
         k_mutex_unlock(&mutex_pedestre);
 
-        k_msleep(TEMPO_VERMELHO_PEDESTRE_MS);
-
-        k_mutex_lock(&mutex_pedestre, K_FOREVER);
-        /* Se foi interrompida pelo botão durante o sleep, descarta o resto e reinicia */
-        if (ciclo_interrompido_ped) {
-            ciclo_interrompido_ped = false;
-            k_mutex_unlock(&mutex_pedestre);
+        if (esperar_ou_interromper(TEMPO_VERMELHO_PEDESTRE_MS)) {
             continue;
         }
-        set_rg_pedestre(0, 0);
-        vezped = 0;
+
+        k_mutex_lock(&mutex_pedestre, K_FOREVER);
+        if (!acao_botao_rodando) {
+            set_rg_pedestre(0, 0);
+            vezped = 0;
+        }
         k_mutex_unlock(&mutex_pedestre);
     }
 }
@@ -216,33 +260,39 @@ void thread_NOTURNO_PEDESTRE(void *p1, void *p2, void *p3)
     }
 }
 
+/* ================= DEFINIÇÃO DAS THREADS POR MODO ================= */
+
 #if MODO_ATUAL == MODO_NOTURNO
-K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, 0);
-K_THREAD_DEFINE(f_tid, 512, thread_NOTURNO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_NOTURNO_PEDESTRE, 0, 0);
+K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(f_tid, 512, thread_NOTURNO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_NOTURNO_PEDESTRE, 0, SYS_FOREVER_MS);
 
 #elif MODO_ATUAL == MODO_NORMAL
-K_THREAD_DEFINE(a_tid, 512, thread_VERDE_CARRO,       NULL, NULL, NULL, PRIO_THREAD_VERDE_CARRO, 0, 0);
-K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,     NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, 0);
-K_THREAD_DEFINE(c_tid, 512, thread_VERMELHO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_VERMELHO_CARRO, 0, 0);
-K_THREAD_DEFINE(d_tid, 512, thread_VERDE_PEDESTRE,    NULL, NULL, NULL, PRIO_THREAD_VERDE_PEDESTRE, 0, 0);
-K_THREAD_DEFINE(e_tid, 512, thread_VERMELHO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_VERMELHO_PEDESTRE, 0, 0);
+K_THREAD_DEFINE(a_tid, 512, thread_VERDE_CARRO,       NULL, NULL, NULL, PRIO_THREAD_VERDE_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,     NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(c_tid, 512, thread_VERMELHO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_VERMELHO_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(d_tid, 512, thread_VERDE_PEDESTRE,    NULL, NULL, NULL, PRIO_THREAD_VERDE_PEDESTRE, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(e_tid, 512, thread_VERMELHO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_VERMELHO_PEDESTRE, 0, SYS_FOREVER_MS);
 
-#else // MODO_BOTAO
-K_THREAD_DEFINE(a_tid, 512, thread_VERDE_CARRO,       NULL, NULL, NULL, PRIO_THREAD_VERDE_CARRO, 0, 0);
-K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,     NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, 0);
-K_THREAD_DEFINE(c_tid, 512, thread_VERMELHO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_VERMELHO_CARRO, 0, 0);
-K_THREAD_DEFINE(d_tid, 512, thread_VERDE_PEDESTRE,    NULL, NULL, NULL, PRIO_THREAD_VERDE_PEDESTRE, 0, 0);
-K_THREAD_DEFINE(e_tid, 512, thread_VERMELHO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_VERMELHO_PEDESTRE, 0, 0);
+#elif MODO_ATUAL == MODO_BOTAO
+#if defined(PLACA1)
+K_THREAD_DEFINE(a_tid, 512, thread_VERDE_CARRO,       NULL, NULL, NULL, PRIO_THREAD_VERDE_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(b_tid, 512, thread_AMARELO_CARRO,     NULL, NULL, NULL, PRIO_THREAD_AMARELO_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(c_tid, 512, thread_VERMELHO_CARRO,    NULL, NULL, NULL, PRIO_THREAD_VERMELHO_CARRO, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(d_tid, 512, thread_VERDE_PEDESTRE,    NULL, NULL, NULL, PRIO_THREAD_VERDE_PEDESTRE, 0, SYS_FOREVER_MS);
+K_THREAD_DEFINE(e_tid, 512, thread_VERMELHO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_VERMELHO_PEDESTRE, 0, SYS_FOREVER_MS);
 
 void thread_BOTAO_PEDESTRE(void *p1, void *p2, void *p3)
 {
     while (1) {
-        /* Começa bloqueada e volta a se bloquear ao fim de cada acionamento */
+        /* Bloqueia a si mesma até ser chamada pelo botão */
         k_thread_suspend(k_current_get());
 
-        /* 1. Passa o carro para AMARELO (pedestre continua vermelho) */
+        /* 1. Passa o carro para AMARELO (pedestre permanece vermelho) */
         k_mutex_lock(&mutex_carro, K_FOREVER);
+        k_mutex_lock(&mutex_pedestre, K_FOREVER);
         set_rgb_veiculo(1, 1, 0);
+        set_rg_pedestre(1, 0);
+        k_mutex_unlock(&mutex_pedestre);
         k_mutex_unlock(&mutex_carro);
 
         k_msleep(TEMPO_AMARELO_CARRO_MS);
@@ -258,12 +308,10 @@ void thread_BOTAO_PEDESTRE(void *p1, void *p2, void *p3)
         /* Fica 2 segundos a mais que o tempo normal (4000ms + 2000ms = 6000ms) */
         k_msleep(TEMPO_VERMELHO_CARRO_MS + TEMPO_EXTRA_BOTAO_MS);
 
-        /* 3. Encerra a prioridade do botão e devolve o controle ao ciclo normal */
+        /* 3. Encerra a ação do botão e devolve o controle ao ciclo normal */
         k_mutex_lock(&mutex_carro, K_FOREVER);
         k_mutex_lock(&mutex_pedestre, K_FOREVER);
 
-        set_rgb_veiculo(0, 0, 0);
-        set_rg_pedestre(0, 0);
         vez = 0;    // Volta no verde do carro
         vezped = 1; // Volta no vermelho do pedestre
         acao_botao_rodando = false;
@@ -279,11 +327,20 @@ void thread_BOTAO_PEDESTRE(void *p1, void *p2, void *p3)
     }
 }
 
-K_THREAD_DEFINE(g_tid, 512, thread_BOTAO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_BOTAO, 0, 0);
+K_THREAD_DEFINE(g_tid, 512, thread_BOTAO_PEDESTRE, NULL, NULL, NULL, PRIO_THREAD_BOTAO, 0, SYS_FOREVER_MS);
 #endif
+#endif
+
+/* ================= MAIN E SINCRONIZAÇÃO ================= */
 
 int main(void)
 {
+    if (!gpio_is_ready_dt(&ledr) || !gpio_is_ready_dt(&ledg) || !gpio_is_ready_dt(&ledb) ||
+        !device_is_ready(port_d) || !device_is_ready(port_a)) {
+        return -1;
+    }
+
+    // Configura LEDs RGB onboard e externos
     gpio_pin_configure_dt(&ledr, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&ledg, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure_dt(&ledb, GPIO_OUTPUT_INACTIVE);
@@ -291,20 +348,69 @@ int main(void)
     gpio_pin_configure(port_d, PIN_LED_VERDEP, GPIO_OUTPUT_INACTIVE);
     gpio_pin_configure(port_a, PIN_LED_VERMELHOP, GPIO_OUTPUT_INACTIVE);
 
+    // Configura botão de pedestre (PTA13 ligado ao GND)
     gpio_pin_configure(port_a, PIN_BOTAO, GPIO_INPUT | GPIO_PULL_UP);
 
+    // Configura pinos de sincronização (repouso em 1)
+    gpio_pin_configure(port_a, PIN_SYNC_OUT, GPIO_OUTPUT_ACTIVE);
+    gpio_pin_configure(port_a, PIN_SYNC_IN, GPIO_INPUT | GPIO_PULL_UP);
+    gpio_pin_set(port_a, PIN_SYNC_OUT, 1);
+    k_msleep(20);
+
+    printk("=== Aguardando sincronizacao entre placas ===\n");
+
 #if defined(PLACA1)
+    gpio_pin_set(port_a, PIN_SYNC_OUT, 0); // 1. Envia 0 para PLACA2
+    while (gpio_pin_get(port_a, PIN_SYNC_IN) != 0) { // 2. Aguarda resposta 0 da PLACA2
+        k_msleep(5);
+    }
+    k_msleep(20);
+    gpio_pin_set(port_a, PIN_SYNC_OUT, 1); // 3. Libera linha
+
+#elif defined(PLACA2)
+    while (gpio_pin_get(port_a, PIN_SYNC_IN) != 0) { // 1. Aguarda 0 da PLACA1
+        k_msleep(5);
+    }
+    gpio_pin_set(port_a, PIN_SYNC_OUT, 0); // 2. Responde 0 e segura até PLACA1 ler
+    while (gpio_pin_get(port_a, PIN_SYNC_IN) == 0) { // 3. Espera PLACA1 voltar para 1
+        k_msleep(5);
+    }
+    gpio_pin_set(port_a, PIN_SYNC_OUT, 1); // 4. Libera linha
+#endif
+
+    printk("=== Sincronizado! Iniciando semaforo ===\n");
+
+#if MODO_ATUAL == MODO_NOTURNO
+    k_thread_start(b_tid);
+    k_thread_start(f_tid);
+
+#elif MODO_ATUAL == MODO_NORMAL
+    k_thread_start(a_tid);
+    k_thread_start(b_tid);
+    k_thread_start(c_tid);
+    k_thread_start(d_tid);
+    k_thread_start(e_tid);
+
+#elif MODO_ATUAL == MODO_BOTAO
+#if defined(PLACA1)
+    k_thread_start(a_tid);
+    k_thread_start(b_tid);
+    k_thread_start(c_tid);
+    k_thread_start(d_tid);
+    k_thread_start(e_tid);
+    k_thread_start(g_tid); // Inicia e se suspende aguardando o botão
+
     while (1) {
-#if MODO_ATUAL == MODO_BOTAO
-        /* Ativa apenas se o botão for pressionado (0) E o carro estiver verde (vez == 0) */
+        /* Dispara apenas quando o botão é apertado (0) E o carro da PLACA1 está verde (vez == 0) */
         if (gpio_pin_get(port_a, PIN_BOTAO) == 0 && vez == 0 && !acao_botao_rodando) {
+            printk("Botao acionado! Iniciando travessia estendida...\n");
             acao_botao_rodando = true;
+
+            /* Aguarda 25ms para que as threads saiam de esperar_ou_interromper() */
+            k_msleep(25);
 
             k_mutex_lock(&mutex_carro, K_FOREVER);
             k_mutex_lock(&mutex_pedestre, K_FOREVER);
-
-            ciclo_interrompido_carro = true;
-            ciclo_interrompido_ped = true;
 
             k_thread_suspend(a_tid);
             k_thread_suspend(b_tid);
@@ -317,15 +423,22 @@ int main(void)
 
             k_thread_resume(g_tid);
         }
-#endif
         k_msleep(20);
     }
 
 #elif defined(PLACA2)
+    /* PLACA2 permanece fixa em Carro Vermelho e Pedestre Verde no MODO_BOTAO */
+    set_rgb_veiculo(1, 0, 0);
+    set_rg_pedestre(0, 1);
     while (1) {
-        k_msleep(20);
+        k_sleep(K_FOREVER);
     }
 #endif
+#endif
+
+    while (1) {
+        k_sleep(K_FOREVER);
+    }
 
     return 0;
 }
