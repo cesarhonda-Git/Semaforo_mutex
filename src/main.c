@@ -28,7 +28,12 @@ static const struct gpio_dt_spec ledb = GPIO_DT_SPEC_GET(LEDB_NODE, gpios);
 #error "LEDs não encontrados"
 #endif
 
-static volatile bool ModoNoturno = false;
+
+#define MODO_NORMAL 0
+#define MODO_NOTURNO 1
+#define MODO_BOTAO 2
+
+#define MODO_ATUAL MODO_NORMAL
 
 static void set_rgb_veiculo(int r, int g, int b)
 {
@@ -42,6 +47,9 @@ static void set_rg_pedrestre(int r, int g)
     gpio_pin_set(port_a, PIN_LED_VERMELHOP, r);
     gpio_pin_set(port_d, PIN_LED_VERDEP, g);
 }
+
+
+static volatile bool ModoNoturno = false;
 
 static void pedestre_modo_noturno(void)
 {
@@ -111,3 +119,4 @@ int main(void)
 
     return 0;
 }
+
