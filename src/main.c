@@ -29,8 +29,8 @@ static const struct device *port_a = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 #define TEMPO_VERDE_PEDESTRE_MS    4000
 #define TEMPO_VERMELHO_PEDESTRE_MS    4000
 
-volatile int vez = 0; // comeca no verde
-volatile int vezped = 1; // comeca no vermelho
+volatile int vez = 0; // comeca no verde        vez = 0 -> verde  vez = 1 -> amarelo vez = 2 -> vermelho
+volatile int vezped = 1; // comeca no vermelho  vez = 0 -> verde  vez = 1 -> vermelho
 
 void thread_VERDE_CARRO(void *p1, void *p2, void *p3)
 {
@@ -83,9 +83,9 @@ void thread_VERDE_PEDESTRE(void *p1, void *p2, void *p3)
             k_msleep(10);
             continue;
         }
-        gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 1); // Liga LED D (PTD4) (verde)
+        gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 1); // Liga LED VERDE (PTD4) (verde)
         k_msleep(TEMPO_VERDE_PEDESTRE_MS);
-        gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 0); // Desliga LED D
+        gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 0); // Desliga LED VERDE (PTD4)
         vezped = 1;
     }
 }
@@ -97,9 +97,9 @@ void thread_VERMELHO_PEDESTRE(void *p1, void *p2, void *p3)
             k_msleep(10);
             continue;
         }
-        gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 1); // Liga LED E (PTA12) (v)
+        gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 1); // Liga LED VERMELHO (PTA12) (vermelho)
         k_msleep(TEMPO_VERMELHO_PEDESTRE_MS);
-        gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 0); // Desliga LED E
+        gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 0); // Desliga LED VERMELHO (PTA12)
         vezped = 0;
     }
 }
