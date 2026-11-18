@@ -3,6 +3,12 @@
 #include <zephyr/sys/printk.h>
 #include <zephyr/device.h>
 
+#define MODO_NORMAL 1
+#define MODO_NOTURNO 2
+#define MODO_BOTAO 3
+
+#define MODO_ATUAL MODO_NORMAL
+
 // --- LEDs internos via DeviceTree ---
 #define LED_VERDE_NODE DT_ALIAS(led0)  // LED verde onboard
 #define LED_VERMELHO_NODE DT_ALIAS(led2)  // LED vermelho onboard
@@ -35,6 +41,8 @@ K_MUTEX_DEFINE(mutex_pedestre);
 
 volatile int vez = 0; // comeca no verde        vez = 0 -> verde  vez = 1 -> amarelo vez = 2 -> vermelho
 volatile int vezped = 1; // comeca no vermelho  vez = 0 -> verde  vez = 1 -> vermelho
+
+#if MODO_ATUAL == MODO_NORMAL
 
 void thread_VERDE_CARRO(void *p1, void *p2, void *p3)
 {
@@ -158,3 +166,10 @@ int main(void)
     }
     return 0;
 }
+
+#endif
+
+#if MODO_ATUAL == MODO_NOTURNO
+#endif
+#if MODO_ATUAL == MODO_BOTAO
+#endif
