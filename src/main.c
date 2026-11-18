@@ -29,78 +29,107 @@ static const struct device *port_a = DEVICE_DT_GET(DT_NODELABEL(gpioa));
 #define TEMPO_VERDE_PEDESTRE_MS    4000
 #define TEMPO_VERMELHO_PEDESTRE_MS    4000
 
+// --- Definição dos Mutexes ---
+K_MUTEX_DEFINE(mutex_carro);
+K_MUTEX_DEFINE(mutex_pedestre);
+
 volatile int vez = 0; // comeca no verde        vez = 0 -> verde  vez = 1 -> amarelo vez = 2 -> vermelho
 volatile int vezped = 1; // comeca no vermelho  vez = 0 -> verde  vez = 1 -> vermelho
 
 void thread_VERDE_CARRO(void *p1, void *p2, void *p3)
 {
     while (1) {
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         if (vez != 0) {
+            k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
         }
         gpio_pin_set_dt(&ledVERDE, 1);
+        k_mutex_unlock(&mutex_carro);
         k_msleep(TEMPO_VERDE_CARRO_MS);
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         gpio_pin_set_dt(&ledVERDE, 0);
         vez = 1;
+        k_mutex_unlock(&mutex_carro);
     }
 }
 
 void thread_AMARELO_CARRO(void *p1, void *p2, void *p3)
 {
     while (1) {
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         if (vez != 1) {
+            k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
         }
         gpio_pin_set_dt(&ledVERMELHO, 1);
         gpio_pin_set_dt(&ledVERDE, 1);
+        k_mutex_unlock(&mutex_carro);
         k_msleep(TEMPO_AMARELO_CARRO_MS);
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         gpio_pin_set_dt(&ledVERMELHO, 0);
         gpio_pin_set_dt(&ledVERDE, 0);
         vez = 2;
+        k_mutex_unlock(&mutex_carro);
     }
 }
 
 void thread_VERMELHO_CARRO(void *p1, void *p2, void *p3)
 {
     while (1) {
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         if (vez != 2) {
+            k_mutex_unlock(&mutex_carro);
             k_msleep(10);
             continue;
         }
         gpio_pin_set_dt(&ledVERMELHO, 1);
+        k_mutex_unlock(&mutex_carro);
         k_msleep(TEMPO_VERMELHO_CARRO_MS);
+        k_mutex_lock(&mutex_carro, K_FOREVER);
         gpio_pin_set_dt(&ledVERMELHO, 0);
         vez = 0;
+        k_mutex_unlock(&mutex_carro);
     }
 }
 
 void thread_VERDE_PEDESTRE(void *p1, void *p2, void *p3)
 {
+    k_mutex_lock(&mutex_pedestre, K_FOREVER);
     while (1) {
         if (vezped != 0) {
+            k_mutex_unlock(&mutex_pedestre);
             k_msleep(10);
             continue;
         }
         gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 1); // Liga LED VERDE (PTD4) (verde)
+        k_mutex_unlock(&mutex_pedestre);
         k_msleep(TEMPO_VERDE_PEDESTRE_MS);
+        k_mutex_lock(&mutex_pedestre, K_FOREVER);
         gpio_pin_set(port_d, PIN_LED_VERDE_PEDESTRE, 0); // Desliga LED VERDE (PTD4)
         vezped = 1;
+        k_mutex_unlock(&mutex_pedestre);
     }
 }
 
 void thread_VERMELHO_PEDESTRE(void *p1, void *p2, void *p3)
 {
     while (1) {
+        k_mutex_lock(&mutex_pedestre, K_FOREVER);
         if (vezped != 1) {
+            k_mutex_unlock(&mutex_pedestre);
             k_msleep(10);
             continue;
         }
         gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 1); // Liga LED VERMELHO (PTA12) (vermelho)
+        k_mutex_unlock(&mutex_pedestre);
         k_msleep(TEMPO_VERMELHO_PEDESTRE_MS);
+        k_mutex_lock(&mutex_pedestre, K_FOREVER);
         gpio_pin_set(port_a, PIN_LED_VERMELHO_PEDESTRE, 0); // Desliga LED VERMELHO (PTA12)
         vezped = 0;
+        k_mutex_unlock(&mutex_pedestre);
     }
 }
 
