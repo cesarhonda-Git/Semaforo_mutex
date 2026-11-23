@@ -1,6 +1,6 @@
 # Atividade Semáforo de pedestres e veículos
 **Erick Amorim Mafra Bomfim** — `17887849`
-
+**César Akira Abe Honda** — `17884099`
 ---
 
 ## 1.1 Testes Unitários (Semáforos Isolados, Threads e Mutexes)
